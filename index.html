@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Cameras</title>
+    <style>
+        #ctl {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            opacity: 0;
+            z-index: 0;
+        }
+
+        #clock {
+            position: absolute;
+            top: 5px;
+            right: 20px;
+            opacity: 0.4;
+            z-index: 20;
+            font-size: 40px;
+            background-color: white;
+            padding: 2px;
+        }
+
+        #ctl.visible {
+            opacity: .85;
+            z-index: 100;
+        }
+
+        html, body {
+            width: 100%;
+            height: 100%;
+            padding: 0;
+            margin: 0;
+            overflow: hidden;
+            background-color: black;
+        }
+
+        #imageContent {
+            background-color: black;
+            position: absolute;
+            width: 100vw;
+            height: 100vh;
+            top: 0;
+            left: 0;
+            z-index: 1;
+            text-align: center;
+            cursor: none;
+        }
+
+        #imageContent img {
+            flex: 1;
+            margin: auto;
+            max-width: 100%;
+        }
+
+        .cam {
+        }
+
+        #slide {
+            max-height: 100%;
+            vertical-align: middle;
+            max-width: 100%;
+        }
+
+        #indicator {
+            color: white;
+            opacity: .6;
+        }
+    </style>
+</head>
+<body>
+<div id="imageContent"></div>
+<div id="ctl" class="visible">
+    <button onclick="showAll(event); return false;">Cameras</button>
+    <button onclick="clearCam(); return false;">Slides</button>
+    <div id="indicator"></div>
+</div>
+<div id="clock"></div>
+<script>
+    var $content = document.getElementById("imageContent");
+    var $ctl = document.getElementById("ctl");
+    var $clock = document.getElementById("clock");
+    var $indicator = document.getElementById('indicator');
+    var $doc = document.documentElement;
+    var ctlTimer = null;
+    var stopping = {};
+    if (!$doc) {
+        $doc = document.body;
+    }
+    $content.onmousedown = $content.onmousemove = $content.onmouseover = function () {
+        $ctl.className = 'visible';
+        if (ctlTimer) {
+            clearTimeout(ctlTimer)
+        }
+        ctlTimer = setTimeout(function () {
+            $ctl.className = '';
+        }, 7000)
+    };
+
+    function showOneCam(cameraNo) {
+        var camNo = cameraNo;
+        var imgTag = document.getElementById("cam" + camNo);
+        if (!imgTag) {
+            imgTag = new Image();
+            $content.appendChild(imgTag);
+        }
+        imgTag.id = 'cam' + camNo;
+        imgTag.className = 'cam';
+        imgTag.src = '/cam/' + camNo + '/' + Math.random() + '/cam' + camNo;
+
+        var restart = function () {
+//            console.log('restart', camNo, this.src);
+            clearTimeout(restartTimeout);
+            if (!imgTag.src || !imgTag.parentNode) {
+                imgTag.src = '';
+                return;
+            }
+            imgTag.src = '/cam/' + camNo + '/' + Math.random() + '/cam' + camNo;
+            restartTimeout = setTimeout(restart.bind(imgTag), 20000);
+        };
+        imgTag.onabort = function () {
+            console.log("Abort cam", camNo, this);
+        };
+        imgTag.onerror = function () {
+            if (imgTag.src && imgTag.parentNode) {
+                setTimeout(restart.bind(imgTag), 100);
+            }
+        };
+        var restartTimeout = setTimeout(restart.bind(imgTag), 20000);
+
+        fixCamHeight();
+        return imgTag;
+    }
+
+    function fixCamHeight() {
+        var imgs = document.getElementsByClassName('cam');
+        if (imgs.length <= 0) {
+            return
+        }
+        if (imgs.length === 1) {
+            imgs[0].style.width = '100%';
+            imgs[0].style.height = '';
+        } else {
+            var heightPcnt = 100 / imgs.length;
+            heightPcnt += '%';
+            for (var i = 0; i < imgs.length; i++) {
+                imgs[i].style.height = heightPcnt;
+                imgs[i].style.width = '';
+            }
+        }
+    }
+
+    function showAll(event) {
+        actions.motionStart({camera: 0});
+        actions.motionStart({camera: 1});
+        setTimeout(clearCam, 300000);
+        event.cancelBubble = true;
+        event.preventDefault();
+        return false;
+    }
+
+    function clearCam() {
+        actions.motionStop({camera: 0});
+        actions.motionStop({camera: 1});
+    }
+
+    function SlideShow() {
+        this.slides = [];
+        this.started = false;
+        this.currentImageNo = 0;
+        this.nextImg = new Image();
+        var self = this;
+
+        var fixHeight = function () {
+            var docHeight = $content.clientHeight;
+            if (self.image.height >= docHeight - 4) {
+                return;
+            }
+            var top = parseInt((docHeight - self.image.height) / 2);
+            if (top <= 0) {
+                return
+            }
+            self.image.style.paddingTop = top + 'px';
+        };
+        this._prepareStart = function () {
+
+            self.image = document.getElementById("slide");
+            if (!self.image) {
+                if (self.nextImg) {
+                    if ($content.children.length > 0) {
+                        // replace first item with image which was for preload
+                        $content.replaceChild(slideShow.nextImg, $content.children[0]);
+                        // remove other child (there will not another child)
+                        for (i = 1; i < $content.children.length; i++) {
+                            // this never executed
+                            $content.removeChild($content.children[i]);
+                        }
+                    } else {
+                        // already has not child (never executed too)
+                        $content.appendChild(self.nextImg);
+                    }
+                    // set ID of tag which is alrady in DOM
+                    self.image = self.nextImg;
+                    self.image.id = "slide";
+                    // create new image for preload
+                    self.nextImg = new Image();
+                } else {
+                    $content.innerHTML = '<img id="slide" >';
+                    self.image = document.getElementById("slide");
+                }
+            }
+        };
+        this.start = (function (src) {
+
+            if (this.timer) {
+                clearTimeout(this.timer);
+            }
+            this.started = true;
+            this._prepareStart();
+            if (this.slides.length <= 0) {
+                console.log("No slides yet");
+                return;
+            }
+            if (this.currentImageNo >= this.slides.length) {
+                this.currentImageNo = 0;
+                self._shuffle();
+            }
+            _next('Start:' + (src || ''));
+        }).bind(this);
+        var _next = function (src) {
+            self.image.src = self.slides[self.currentImageNo];
+            self.image.onload = fixHeight;
+            self.image.style.paddingTop = null;
+            self.currentImageNo++;
+            if (self.currentImageNo >= self.slides.length) {
+                self.currentImageNo = 0;
+                _shuffle()
+            }
+            self.nextImg.src = self.slides[self.currentImageNo];
+            if (self.timer) {
+                clearTimeout(self.timer);
+            }
+            self.timer = setTimeout(_next.bind(this), SLIDE_TIMEOUT);
+        };
+        var _shuffle;
+        if (window.crypto && window.crypto.getRandomValues) {
+            _shuffle = self._shuffle = function () {
+                var w, iw = {};
+                console.log('shuffle crypto');
+                w = window.crypto.getRandomValues(new Int16Array(self.slides.length));
+                self.slides.map(function (slide, i) {
+                    return iw[slide] = w[i];
+                });
+                self.slides = self.slides.sort(function (a, b) {
+                    return iw[a] > iw[b] ? 1 : -1;
+                });
+            };
+        } else {
+            _shuffle = self._shuffle = function () {
+                var w, iw = {};
+                console.log('shuffle Math.random');
+                w = self.slides.map(function (slide, i) {
+                    return iw[slide] = parseInt(Math.random() * self.slides.length * 10);
+                });
+                self.slides = self.slides.sort(function (a, b) {
+                    return iw[a] > iw[b] ? 1 : -1;
+                });
+            };
+        }
+
+        this.stop = function () {
+            if (self.timer) {
+                clearTimeout(this.timer);
+            }
+            self.timer = null;
+            if (!self.started) {
+                return
+            }
+            self.started = false;
+            if (self.image && self.image.parentNode) {
+                self.image.parentNode.removeChild(self.image);
+            }
+        };
+    }
+
+    var SLIDE_TIMEOUT = 10000;
+    var AFTER_MOTION_STOP_TIMEOUT = 5000;
+    SlideShow.prototype.setSlides = function (newSlides) {
+        var wasSlides = (this.slides.length > 0);
+        this.slides = newSlides;
+        this._shuffle();
+        if (this.currentImageNo >= this.slides.length) {
+            this.currentImageNo = 0;
+        }
+        if (wasSlides) {
+            return
+        }
+        if (this.started) {
+            this.start("set Slides:");
+        }
+    };
+    var slideShow = new SlideShow();
+    var actions = {
+        motionStart: function (payload) {
+            if (stopping[payload.camera]) {
+                clearTimeout(stopping[payload.camera]);
+            }
+            stopping[payload.camera] = null;
+            if (document.getElementById('cam' + payload.camera)) {
+                // Don't really start - camera already shown
+                return;
+            }
+            try {
+                slideShow.stop();
+            } catch (err) {
+                console.error(err);
+                alert("stop slide error " + err);
+            }
+            showOneCam(payload.camera)
+        },
+        motionStop: function (payload) {
+            var camNo = payload.camera;
+            var imgTag = document.getElementById("cam" + camNo);
+            if (!imgTag || stopping[camNo] || slideShow.started) {
+                return;
+            }
+
+            stopping[camNo] = setTimeout(function () {
+                var imgTag = document.getElementById("cam" + camNo);
+                if (imgTag && imgTag.parentNode) {
+                    imgTag.src = '';
+                    imgTag.parentNode.removeChild(imgTag);
+                    delete imgTag.onabort;
+                    delete imgTag.onerror;
+                    delete imgTag.onload;
+                    imgTag.onabort = null;
+                    imgTag.onerror = null;
+                    imgTag.onload = null;
+                    delete imgTag.src;
+                    imgTag = null;
+                }
+                if (document.getElementsByClassName('cam').length > 1) {
+                    fixCamHeight();
+                    //Another camera shown yet - don't start slides");
+                    return;
+                }
+
+                if (!slideShow.started) {
+                    slideShow.start("stop motion");
+                }
+            }, AFTER_MOTION_STOP_TIMEOUT);
+        },
+        refreshSlides: function (payload) {
+            slideShow.setSlides(payload.slides)
+        },
+        showImage: function (payload) {
+            slideShow.showImage(payload.image, payload.time);
+        },
+        ping: function (payload) {
+            console.log("ping from ws");
+        },
+        execJS: function (payload) {
+            eval(payload.code);
+        }
+    };
+
+    function connectWS() {
+        var ws = new WebSocket('ws://' + location.host.split(':')[0] + ':8765/ws/control');
+        var reconnectTimeout = null;
+        var pingTimeout = null;
+
+        var reconnect = function () {
+            if (reconnectTimeout) {
+                clearTimeout(reconnectTimeout)
+            }
+            if (pingTimeout) {
+                clearTimeout(pingTimeout);
+            }
+            ws.onerror = null;
+            ws.onclose = null;
+            ws.onmessage = null;
+            ws = null;
+            connectWS();
+        };
+        var waitAndPing = function () {
+            if (pingTimeout) {
+                clearTimeout(pingTimeout);
+            }
+            pingTimeout = setTimeout(function () {
+                pingTimeout = null;
+                if (!ws) {
+                    return;
+                }
+                ws.send('{"ping":""}');
+                waitAndPing();
+            }, 60000);
+        };
+        ws.onmessage = function (msg) {
+            var payload = JSON.parse(msg.data);
+            if (payload.action && actions[payload.action]) {
+                actions[payload.action](payload)
+            }
+            waitAndPing();
+        };
+        ws.onerror = function (event) {
+            setTimeout(reconnect, 500)
+        };
+        ws.onclose = function (event) {
+            setTimeout(reconnect, 500)
+        };
+        ws.onopen = function (event) {
+            window.controlWS = ws;
+        };
+        waitAndPing();
+    }
+
+    var isFullscreen = false;
+    $doc.onclick = function () {
+        if (isFullscreen && document.fullscreenElement !== null) {
+            return;
+        }
+
+        try {
+            if ($doc.requestFullscreen) {
+                $doc.requestFullscreen().then(function (res) {
+                    console.log(res);
+                });
+            } else if ($doc.webkitRequestFullscreen) {
+                $doc.webkitRequestFullscreen();
+            } else if ($doc.webkitRequestFullScreen) {
+                $doc.webkitRequestFullScreen();
+            }
+            isFullscreen = true;
+//            $doc.onclick=null;
+        } catch (e) {
+            $indicator.innerHTML += "<hr>" + e;
+        }
+
+    };
+    connectWS();
+    try {
+        slideShow.start();
+    } catch (e) {
+        console.error(e);
+        alert(e);
+    }
+    var lastClock = '';
+
+    function updateClock() {
+        var newClock = '';
+        try {
+            var d = new Date();
+            var m = d.getMinutes();
+            if (m < 10) {
+                m = '0' + m;
+            }
+            var h = d.getHours();
+            newClock = h + ':' + m;
+            if (lastClock === newClock) {
+                return
+            }
+            lastClock = newClock;
+            $clock.innerHTML = newClock;
+
+            $content.style.opacity = getOpacity(h, m);
+        } catch (e) {
+            console.error(e);
+            alert(e);
+        }
+
+    }
+
+    function getOpacity(h, m) {
+        if (h >= 23 || h < 7) {
+            return 0.25;
+        }
+        if (h >= 22) {
+            return 1 - m / 80;
+        }
+        if (h < 8){
+            return 1/4 + m / 80;
+        }
+        return 1;
+    }
+
+    setInterval(updateClock, 500);
+</script>
+<img src="/_refresh_slides/" onload="this.parentNode.removeChild(this)" onerror="this.parentNode.removeChild(this)">
+</body>
+</html>
