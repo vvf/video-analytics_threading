@@ -23,6 +23,7 @@ class RTSPReaderThread(Thread):
         self.rtsp_url = kwargs.pop('rtsp_url', settings.rtsp_url)
         kwargs['name'] = f'RTSPCamReader-{RTSPReaderThread.instance_counter}'
         RTSPReaderThread.instance_counter += 1
+        kwargs['daemon'] = True
         super(RTSPReaderThread, self).__init__(*args, **kwargs)
 
     def run(self):

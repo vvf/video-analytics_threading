@@ -66,11 +66,12 @@ class BotApi:
             resp = requests.post(bot_url + '/sendVideo', data=kwargs, files=files)
         return resp.json().get('result')
 
-    def send_image_to_amdin(self, image):
+    def send_image_to_amdin(self, image, **kwargs):
         for admin_id in settings.BOT_ADMINS:
             last_result = self.sendPhoto(
                 chat_id=admin_id,
-                photo=image
+                photo=image,
+                **kwargs
             )
         return last_result
 
@@ -110,7 +111,11 @@ def bot_loop():
     global _bot_running
     last_offset = None
     while _bot_running:
-        updates = bot.getUpdates(offset=last_offset, limit=5, timeout=900)
+        try:
+            updates = bot.getUpdates(offset=last_offset, limit=5, timeout=900)
+        except Exception:
+            updates = None
+            pass
         if not updates:
             continue
         for update in updates:
@@ -131,7 +136,7 @@ def stop_bot():
 
 def start_bot():
     global bot_thread
-    bot_thread = Thread(target=bot_loop, name='TgBot')
+    bot_thread = Thread(target=bot_loop, name='TgBot', daemon=True)
     bot_thread.start()
 
 
@@ -219,6 +224,7 @@ def bot_get_callbacks(update):
                 fname
             )
             Thread(target=send_video_and_del_message,
+                   daemon=True,
                    kwargs=dict(
                        chat_id=chat_id,
                        video=p,
@@ -323,9 +329,9 @@ def send_motion_start(image):
 def send_photo_to_admins(image, **kwargs):
     rv, jpg = cv2.imencode('.jpeg', image)
     if rv:
-        img_ret = bot.send_image_to_amdin(jpg)
-        if kwargs.get('caption'):
-            bot.message_to_admin(kwargs['caption'], disable_notification=True)
+        img_ret = bot.send_image_to_amdin(jpg, **kwargs)
+        # if kwargs.get('caption'):
+        #     bot.message_to_admin(kwargs['caption'], disable_notification=True)
         return img_ret
     else:
         return bot.message_to_admin("Error converting image")

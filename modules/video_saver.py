@@ -44,7 +44,7 @@ class ViewSaver:
         if not self.worker_thread:
             video_file_name = 'motion_{:%Y%m%d_%H%M%S}.mp4'.format(datetime.now())
             self.file_name = os.path.join(get_date_dirname(), video_file_name)
-            self.worker_thread = Thread(target=self.write_worker, name="View_file_writer")
+            self.worker_thread = Thread(target=self.write_worker, name="View_file_writer", daemon=True)
             self.worker_thread.start()
 
     def write_worker(self):

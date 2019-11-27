@@ -42,7 +42,13 @@ class AlarmZone:
             self.last_motion_id = motion_id
         elif next_alarm_time and next_alarm_time > datetime.datetime.now():
             return
-
+        if is_person_or_car:
+            w = end_x-start_x
+            h = end_y-start_y
+            (max_h, max_w) = image.shape[:2]
+            if w > max_w*3/4:
+                # human cannot be wide at 3/4 of frame
+                return
         if self.is_in_zone(start_x, start_y, end_x, end_y, is_person_or_car):
             obj = 'Человек' if is_person_or_car else 'Автомобиль'
             self.last_alarm_count[is_person_or_car] += 1
@@ -72,6 +78,7 @@ class AlarmZone:
 
 class WaitSendThread(Thread):
     def __init__(self, *args, **kwargs):
+        kwargs['daemon'] = True
         super(WaitSendThread, self).__init__(*args, **kwargs)
         self.image = None
         self.title = None
@@ -80,7 +87,7 @@ class WaitSendThread(Thread):
         self.parent = kwargs.pop('parent', None)
 
     def set_image(self, image, title=None, is_person_or_car=''):
-        self.image = image
+        self.image = image.copy()
         self.title = title
         self.is_person_or_car = is_person_or_car
         logger.info(f"Alarmer,Wait: Skip prev image. {self.skipped_images}")

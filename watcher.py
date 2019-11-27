@@ -233,6 +233,7 @@ def get_details_objects_plate(obj_type, img, dirname, npp=0, now_ts=None):
                 rimg = img
             cv2.imwrite(os.path.join(dirname, fname), rimg[y:y + h, x:x + w])
             if obj_type == 'license':
+                logger.info("queue OCR license no")
                 redis.lpush('licenses', os.path.join(dirname, fname))
         return True
 

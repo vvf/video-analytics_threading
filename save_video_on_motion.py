@@ -17,6 +17,11 @@ vcap = None
 first_image_small = None
 detectors = {}
 look_at_image_thread = None
+BLUR_PARAM = (11,11)
+
+SMALL_IMG_DIM = (480,270) #(576,324)
+SMALL_IMG_K = SMALL_IMG_DIM[0]/1920
+
 
 def open_video():
     global vcap
@@ -26,11 +31,6 @@ def open_video():
         time.sleep(1)
 
     vcap = cv2.VideoCapture(rtsp_url)
-
-BLUR_PARAM = (11,11)
-
-SMALL_IMG_DIM = (480,270) #(576,324)
-SMALL_IMG_K = SMALL_IMG_DIM[0]/1920
 
 
 def read_first_image():
@@ -63,6 +63,7 @@ def read_frame():
         last_ts = datetime.now()
 
     return image  #  [45:1045,900:1900]
+
 
 def wait_motion(wait_no_motion=False, wait_frames=2):
     global first_image_small

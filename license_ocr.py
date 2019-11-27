@@ -2,6 +2,7 @@
 import re
 
 import cv2
+import functools
 import pytesseract
 from datetime import datetime, timedelta
 from redis import Redis
@@ -27,10 +28,13 @@ redis = Redis()
 reactions_timeouts = {}
 
 
+print = functools.partial(print, flush=True)
+
 def try_OCR_file(fname):
     img = cv2.imread(fname)
     if img is None:
-        return
+        print(f'Can`t read {fname}')
+        return None
     h, w = img.shape[:2]
     if w < 50:
         print(f'\t{fname} too small')
@@ -48,14 +52,14 @@ def try_OCR_file(fname):
 
 
 known_car_timeout = datetime.now()
-print("Wait for filenames\n\n")
+print(f"Wait for filenames. queue len at start -{redis.llen(queue)}\n\n")
 while True:
     _, msg = redis.blpop(queue)
     if known_car_timeout > datetime.now():
         print(f'skip {msg.decode("utf8")}')
         continue
     license_no_text = try_OCR_file(msg.decode())
-    if not license_no_text:
+    if not license_no_text or len(license_no_text) < 3:
         continue
     for car_no, message_text in reactions.items():
         timeout = reactions_timeouts.get(car_no)
