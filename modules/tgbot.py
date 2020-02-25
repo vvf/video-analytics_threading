@@ -10,13 +10,13 @@ import requests
 import logging
 from functools import partial
 
-from redis import Redis
+from redis import StrictRedis
 
 import settings
 from threading import Thread
 
 logger = logging.getLogger(__name__)
-redis = Redis()
+redis = StrictRedis()
 
 
 def call_api(method, **data):
@@ -50,7 +50,24 @@ class BotApi:
         for admin_id in settings.BOT_ADMINS:
             self.text(admin_id, text, **kwargs)
 
+    def message_to_subscribers(self, subscriber_type, text, **kwargs):
+        dont_add_admins = kwargs.pop('dont_add_admins', None)
+        subscribers = {m.decode() for m in redis.smembers(subscriber_type)}
+        if not dont_add_admins:
+            subscribers |= set(settings.BOT_ADMINS)
+        for subscriber_id in subscribers:
+            self.text(subscriber_id, text, **kwargs)
+
+    def photo_to_subscribers(self, subscriber_type, photo, **kwargs):
+        dont_add_admins = kwargs.pop('dont_add_admins', None)
+        subscribers = {m.decode() for m in redis.smembers(subscriber_type)}
+        if not dont_add_admins:
+            subscribers |= set(settings.BOT_ADMINS)
+        for subscriber_id in subscribers:
+            self.sendPhoto(subscriber_id, photo, **kwargs)
+
     def sendPhoto(self, chat_id, photo, **kwargs):
+        # here camelCase because it overrides APIs method
         bot_url = 'https://api.telegram.org/bot' + settings.TG_BOT_TOKEN
         files = {'photo': photo}
         kwargs['chat_id'] = chat_id
@@ -58,6 +75,7 @@ class BotApi:
         return resp.json().get('result')
 
     def sendVideo(self, chat_id, video, **kwargs):
+        # here camelCase because it overrides APIs method
         bot_url = 'https://api.telegram.org/bot' + settings.TG_BOT_TOKEN
         bot.sendChatAction(chat_id=chat_id, action='upload_video')
         with open(video, 'rb') as f:
@@ -82,8 +100,18 @@ bot_handlers = []
 bot_wait_image_chats = []
 _bot_running = True
 bot_thread = None
-WAIT_MOTION_CHATS_KEY = "bot_wait_motion_chats"
+# WAIT_MOTION_CHATS_KEY = "bot_wait_motion_chats"
+WAIT_MOTION_CHATS_KEY = "motion_subscribers"
 STATE_KEY = 'bot_chat_state'
+
+AVAILABLE_SUBSCRIBES = {
+    'known_cars': 'известная машина в зоне ворот',
+    'motion': "любое движение перед уличной камерой",
+    'monitor_person': "человек в зоне мониторигна",
+    'monitor_car': "машина в зоне мониторигна",
+    'monitor_any': "человек или машина в зоне мониторигна",
+    'car_license_no': "появление машины с похожим номером (нужно указать номер, не менее 3х символов)"
+}
 
 
 def count_of_users_waiting_motion():
@@ -91,15 +119,15 @@ def count_of_users_waiting_motion():
 
 
 def is_user_waiting_motion(chat_id: str):
-    return redis.sismember(WAIT_MOTION_CHATS_KEY, chat_id)
+    return redis.sismember(WAIT_MOTION_CHATS_KEY, str(chat_id))
 
 
 def stop_waiting_motion(chat_id: str):
-    return redis.srem(WAIT_MOTION_CHATS_KEY, chat_id)
+    return redis.srem(WAIT_MOTION_CHATS_KEY, str(chat_id))
 
 
 def start_waiting_motion(chat_id: str):
-    return redis.sadd(WAIT_MOTION_CHATS_KEY, chat_id)
+    return redis.sadd(WAIT_MOTION_CHATS_KEY, str(chat_id))
 
 
 def add_bot_handler(bot_handler):
@@ -113,7 +141,8 @@ def bot_loop():
     while _bot_running:
         try:
             updates = bot.getUpdates(offset=last_offset, limit=5, timeout=900)
-        except Exception:
+        except Exception as error:
+            logger.exception(error)
             updates = None
             pass
         if not updates:
@@ -141,12 +170,19 @@ def start_bot():
 
 
 @add_bot_handler
-def bot_get_image_cmd(update):
+def bot_check_commands(update):
     if not 'message' in update:
         return
     message = update['message']
     chat_id = message['chat']['id']
-    if message.get('text', ' ').split(' ')[0] == '/get_image':
+    is_command = message.get('text', ' ').startswith('/')
+    command_args = message.get('text', ' ').split(' ')
+    if command_args and is_command:
+        command = command_args.pop(0)
+        logger.debug(f"got command: {command}")
+    else:
+        command = ''
+    if command == '/get_image':
         if chat_id in bot_wait_image_chats:
             return True
         msg = bot.answer(update, "Вам сейчас будет прислана фото с камеры")
@@ -154,21 +190,21 @@ def bot_get_image_cmd(update):
         bot.sendChatAction(chat_id=chat_id, action='upload_photo')
         return True
 
-    if message.get('text', ' ').split(' ')[0] == '/wait_motion':
+    if command == '/wait_motion':
         if is_user_waiting_motion(chat_id):
             bot.answer(update, "Вы уже подписаны на движения")
             return
         start_waiting_motion(chat_id)
         bot.answer(update, "Вам будет прислано фото когда будет обнаружено движение")
         return True
-    if message.get('text', ' ').split(' ')[0] == '/stop_motion':
-        if is_user_waiting_motion(chat_id):
+    if command == '/stop_motion':
+        if not is_user_waiting_motion(chat_id):
             bot.answer(update, "Вы и не подписаны на движения")
             return
         stop_waiting_motion(chat_id)
         bot.answer(update, "Вам больше не будут приходить фото при обнаружении движения")
         return True
-    if message.get('text', ' ').split(' ')[0] == '/get_video':
+    if command == '/get_video':
         bot.answer(update, "За какой день:", reply_markup={
             'inline_keyboard': [
                 [inline_button(
@@ -177,6 +213,61 @@ def bot_get_image_cmd(update):
                 )] for d in range(5)
             ]
         })
+        return True
+
+    if command == '/sub':
+        logger.debug(f"subscribe command, arguments: {command_args}")
+        if not command_args:
+            logger.debug(f"subscribe command, not arguments, response usage hint ")
+            answer_subscribe_hint(update, command, 'Команда "Подписаться на уведомления".')
+            return True
+        subscribe_type = command_args[0]
+        if subscribe_type == 'show':
+            bot.answer(update, 'Вы подписаны на {}'.format(
+                ', '.join(k.decode()[:-12].replace('_', '-')
+                          for k in redis.keys('*_subscribers') if redis.sismember(k, chat_id))))
+            return True
+        if subscribe_type not in AVAILABLE_SUBSCRIBES:
+            answer_subscribe_hint(update, command, 'Команда "Подписаться на уведомления"\nУкажите правильный аргумент.')
+            return True
+        if subscribe_type == 'car_license_no':
+            # TODO: here add check argument to valud chars
+            if len(command_args) < 2 or 4 > len(command_args[1]) > 9 or not command_args[1].isalnum():
+                answer_subscribe_hint(update, command,
+                                      'Команда "Подписаться на уведомления о машине с номерным знаком"'
+                                      '\nУкажите правильный аргумент номер машины.')
+                return True
+            license_no = command_args[1]
+            redis_key = f'car_license_no_{license_no.upper()}_subscribers'
+        else:
+            redis_key = f'{subscribe_type}_subscribers'
+        redis.sadd(redis_key, chat_id)
+        bot.answer(update, f'Вы подписались на уведомления "{AVAILABLE_SUBSCRIBES[subscribe_type].split("(", 1)[0]}"')
+        return True
+
+    if command == '/unsub':
+        if not command_args:
+            answer_subscribe_hint(update, command, 'Команда "Отписаться от уведомлений".')
+            return True
+        subscribe_type = command_args[0]
+        if subscribe_type not in AVAILABLE_SUBSCRIBES:
+            answer_subscribe_hint(update, command, 'Команда "Отписаться от уведомлений"\nУкажите правильный аргумент.')
+            return True
+        redis_key = f'{subscribe_type}_subscribers'
+        redis.srem(redis_key, chat_id)
+        bot.answer(update, f'Вы отписаись от уведомлений "{AVAILABLE_SUBSCRIBES[subscribe_type]}"')
+        return True
+    return False
+
+
+def answer_subscribe_hint(update, command, txt):
+    message = f"{txt}\nДля этой команды обязателен аргумент:\n" + \
+              '\n'.join(f'  {k} - {v}' for k, v in AVAILABLE_SUBSCRIBES.items())
+    bot.answer(
+        update,
+        message,
+        parse_mode="HTML"
+    )
 
 
 @add_bot_handler
@@ -312,7 +403,7 @@ def send_photo_if_need(cam_no, image, frame_no=None):
 next_sent_motion_time = None
 
 
-def send_motion_start(image):
+def send_motion_start(image, motion_id):
     global next_sent_motion_time
     if next_sent_motion_time and next_sent_motion_time > datetime.datetime.now():
         return 'time'
@@ -320,7 +411,7 @@ def send_motion_start(image):
     next_sent_motion_time = datetime.datetime.now() + datetime.timedelta(seconds=10)
     if rv:
         for u in redis.sscan_iter(WAIT_MOTION_CHATS_KEY):
-            bot.sendPhoto(chat_id=u.decode(), photo=jpg)
+            bot.sendPhoto(chat_id=u.decode(), photo=jpg, title=f"Motion id:{motion_id}")
     else:
         bot.message_to_admin("Error converting image")
     bot.message_to_admin(f"len(bot_wait_image_chats)={len(bot_wait_image_chats)}")
@@ -335,3 +426,23 @@ def send_photo_to_admins(image, **kwargs):
         return img_ret
     else:
         return bot.message_to_admin("Error converting image")
+
+
+def send_monitoring_photo(image, is_person_or_car: bool, **kwargs):
+    rv, jpg = cv2.imencode('.jpeg', image)
+    if not rv:
+        return bot.message_to_admin("Error converting image")
+    bot.send_image_to_amdin(jpg, **kwargs)
+
+    logger.debug(f"Send to monitor_any subscribers:{len(redis.smembers('monitor_any_subscribers'))}")
+    for u in redis.sscan_iter('monitor_any_subscribers'):
+        logger.debug(f"Send monitor_any to {u.decode()}")
+        bot.sendPhoto(chat_id=u.decode(), photo=jpg, **kwargs)
+
+    redis_key = 'monitor_{}_subscribers'.format(
+        'person' if is_person_or_car else 'car'
+    )
+    for u in redis.sscan_iter(redis_key):
+        logger.debug(f"Send {redis_key} to {u.decode()}")
+        bot.sendPhoto(chat_id=u.decode(), photo=jpg, **kwargs)
+

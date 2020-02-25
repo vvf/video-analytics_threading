@@ -87,11 +87,11 @@ def image_parser_worker():
     is_odd = True
     while look_image_queue:
         queue_len = len(look_image_queue)
-        if queue_len > 2000:
+        if queue_len > 700:
             logger.warning("Image queue to long, don't look to image")
             end_motion_frames.append(look_image_queue.pop(0))
         else:
-            if is_odd or queue_len <= 500:
+            if is_odd or queue_len <= 400:
                 look_at_image(look_image_queue.pop(0))
             else:
                 end_motion_frames.append(look_image_queue.pop(0))
@@ -307,8 +307,8 @@ def cam1_loop():
 
 
 def main():
-    tgbot.start_bot()
     init_logging()
+    tgbot.start_bot()
     init_dnn()
     global alarmer, motion_id, rtsp_reader
     rtsp_reader = RTSPReaderThread()

@@ -34,14 +34,14 @@ def try_OCR_file(fname):
     img = cv2.imread(fname)
     if img is None:
         print(f'Can`t read {fname}')
-        return None
+        return ''
     h, w = img.shape[:2]
     if w < 50:
         print(f'\t{fname} too small')
-        return None
+        return ''
     text: str = pytesseract.image_to_string(img, config=tesseract_config)
     if not text:
-        return None
+        return ''
     text: str = text.upper()
     for src, dst in substitutions.items():
         if src not in char_whitelist:
@@ -55,10 +55,11 @@ known_car_timeout = datetime.now()
 print(f"Wait for filenames. queue len at start -{redis.llen(queue)}\n\n")
 while True:
     _, msg = redis.blpop(queue)
+    filename = msg.decode()
     if known_car_timeout > datetime.now():
-        print(f'skip {msg.decode("utf8")}')
+        print(f'skip {filename}')
         continue
-    license_no_text = try_OCR_file(msg.decode())
+    license_no_text = try_OCR_file(filename).upper()
     if not license_no_text or len(license_no_text) < 3:
         continue
     for car_no, message_text in reactions.items():
@@ -68,7 +69,15 @@ while True:
         print(f'{car_no}\t{message_text}')
         if timeout and timeout > datetime.now():
             continue
-        bot.message_to_admin(message_text)
+        bot.message_to_subscribers('known_cars_subscribers', message_text)
         os.system(ON_KNOWN_CAR_COMMAND.format(message_text=message_text, car_no=car_no))
         known_car_timeout = datetime.now() + timedelta(minutes=1)
         reactions_timeouts[car_no] = known_car_timeout + timedelta(minutes=1)
+
+    for subscribed_to_no in redis.keys(f'car_license_no_*_subscribers'):
+        license_part = subscribed_to_no.decode()[29:]
+        if license_part not in license_no_text:
+            continue
+        with open(filename, 'rb') as f:
+            photo_content = f.read()
+        bot.photo_to_subscribers(subscribed_to_no.decode(),photo_content, dont_add_admins=True)

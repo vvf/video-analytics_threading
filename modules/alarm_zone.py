@@ -90,28 +90,33 @@ class WaitSendThread(Thread):
         self.image = image.copy()
         self.title = title
         self.is_person_or_car = is_person_or_car
-        logger.info(f"Alarmer,Wait: Skip prev image. {self.skipped_images}")
+        logger.info(f"Alarmer, Wait: Skip prev image. {self.skipped_images}")
         self.skipped_images += 1
 
     def run(self):
         try:
-            logger.info("Alarmer,Wait: Start waiting")
+            logger.info("Alarmer, Wait: Start waiting")
             wait_time = 0
             while wait_time < 40:
                 sleep(.05)
                 wait_time += 1
-                if self.skipped_images >= 7:
-                    logger.info(f"Alarmer,Wait: Skipped {self.skipped_images}. stop waiting")
+                if self.skipped_images >= 3:
+                    logger.info(f"Alarmer, Wait: Skipped {self.skipped_images}. stop waiting")
                     break
-            logger.info(f"Alarmer,Wait: Waiting done {wait_time}")
+            logger.info(f"Alarmer, Wait: Waiting done {wait_time}")
             self.skipped_images = 0
             if self.parent:
                 self.parent.wait_thread = None
                 self.parent.set_next_alarm_time(self.is_person_or_car)
             if self.image is not None:
-                tgbot.send_photo_to_admins(image=self.image, caption=self.title)
+                tgbot.send_monitoring_photo(
+                    image=self.image,
+                    is_person_or_car=bool(self.is_person_or_car),
+                    caption=self.title,
+                    title=self.title
+                )
             else:
-                logger.error("Alarmer,Wait: No image to send")
+                logger.error("Alarmer, Wait: No image to send")
             self.image = None
         except Exception as err:
             logger.exception(err)
