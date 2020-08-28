@@ -11,6 +11,10 @@ from settings import ON_CAR_REACTIONS as reactions, ON_KNOWN_CAR_COMMAND
 
 from modules.tgbot import bot
 
+# https://medium.com/@jaafarbenabderrazak.info/ocr-with-tesseract-opencv-and-python-d2c4ec097866
+# https://dropbox.tech/machine-learning/creating-a-modern-ocr-pipeline-using-computer-vision-and-deep-learning
+# https://github.com/clovaai/CRAFT-pytorch
+
 char_whitelist = '1234567890ABEKMHOPCTYX'
 
 invalid_chars_re = re.compile('[^' + char_whitelist + ']')

@@ -59,7 +59,7 @@ class VideoFeed:
                 logger.info(f"{self._stat()}: translation done by count frames = {self.frames_sent}")
                 self.stop_translation()
         except (BrokenPipeError, ConnectionResetError, OSError) as err:
-            logger.exception(err)
+            # logger.exception(err)
             logger.error("Ignore error, just stop translation")
             self.stop_translation()
         # if frame_no:

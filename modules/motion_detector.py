@@ -4,7 +4,6 @@ from datetime import datetime
 import logging
 from threading import Thread, Lock
 
-from modules import tgbot
 from modules.rtsp_reader import RTSPReaderThread
 from settings import SMALL_IMG_DIM, BLUR_PARAM, FRAMES_OF_REAL_MOTION, POST_MOTION_FRAMES, PRE_MOTION_FRAMES
 from modules.main import writer, read_frame, close_video, look_image_queue
@@ -28,8 +27,8 @@ class MotionDetector:
         self.first_image_small = None
         self.count_nonzero_thresh = 0
         self.cam_no = cam_no
-        self.motion_threshold_continue = 100
-        self.motion_threshold_start = 400
+        self.motion_threshold_continue = 50
+        self.motion_threshold_start = 200
         self.another_observers = another_observers or []
         self.last_image = None
         self.has_image_to_show_lock = None
@@ -88,7 +87,7 @@ class MotionDetector:
         return image, has_motion
 
     def is_motion_in_frame(self, image):
-        image_small = cv2.resize(image, SMALL_IMG_DIM)
+        image_small = cv2.resize(image, SMALL_IMG_DIM)[120:, :]
         image_small = cv2.cvtColor(image_small, cv2.COLOR_BGR2GRAY)
         image_small = cv2.GaussianBlur(image_small, BLUR_PARAM, 0)
         if self.first_image_small is None:
@@ -96,7 +95,13 @@ class MotionDetector:
             return MotionDetector.NO_MOTION
         delta = cv2.absdiff(self.first_image_small, image_small)
         thresh = cv2.threshold(delta, 35, 255, cv2.THRESH_BINARY)[1]
-        self.count_nonzero_thresh = np.count_nonzero(thresh)
+
+        self.count_nonzero_thresh = \
+            max([
+                np.count_nonzero(thresh_slice)
+                for thresh_slice_x in np.split(thresh, 4, 1)
+                for thresh_slice in np.split(thresh_slice_x, 3, 0)
+            ])
 
         self.first_image_small = (self.first_image_small * 0.75).astype('uint8') + (image_small * 0.25).astype('uint8')
 
