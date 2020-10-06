@@ -16,11 +16,11 @@ class AlarmZone:
     def __init__(self, height, width):
         self.width = width
         self.height = height
-        self.x1 = width // 5
-        self.x2 = width // 2
-        self.k = (self.x2 - self.x1) / height
+        self.x1 = height // 9
+        self.x2 = height + self.x1
+        self.k = (self.x2 - self.x1) / width
         self.car_y = height // 4
-        self.person_y = height // 2
+        self.person_y = height // 3
         self.next_alarm_time = {}
         self.last_alarm_count = defaultdict(lambda: 0)
         self.last_motion_id = None
@@ -42,12 +42,16 @@ class AlarmZone:
             self.last_motion_id = motion_id
         elif next_alarm_time and next_alarm_time > datetime.datetime.now():
             return
+        (max_h, max_w) = image.shape[:2]
+        w = end_x - start_x
+        h = end_y - start_y
         if is_person_or_car:
-            w = end_x-start_x
-            h = end_y-start_y
-            (max_h, max_w) = image.shape[:2]
-            if w > max_w*3/4:
-                # human cannot be wide at 3/4 of frame
+            if w > max_w * 3 // 4:
+                logger.info(f'human cannot be wide at 3/4 of frame: w={w}, h={h}')
+                return
+        else:
+            if w > int(max_w * 8 // 10) or h > (max_h * 8 // 10) or start_y < 200:
+                logger.info(f'Car cannot be more 80% of frame: w={w}, h={h}')
                 return
         if self.is_in_zone(start_x, start_y, end_x, end_y, is_person_or_car):
             obj = 'Человек' if is_person_or_car else 'Автомобиль'
@@ -100,7 +104,7 @@ class WaitSendThread(Thread):
             while wait_time < 40:
                 sleep(.05)
                 wait_time += 1
-                if self.skipped_images >= 3:
+                if self.skipped_images >= 2:
                     logger.info(f"Alarmer, Wait: Skipped {self.skipped_images}. stop waiting")
                     break
             logger.info(f"Alarmer, Wait: Waiting done {wait_time}")

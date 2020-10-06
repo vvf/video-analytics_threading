@@ -30,6 +30,7 @@ substitutions.update({
 tesseract_config = "-l eng -oem 1 -psm 8 -c language_model_penalty_non_dict_word=0"
 redis = Redis()
 reactions_timeouts = {}
+reactions_repeats = {}
 
 
 print = functools.partial(print, flush=True)
@@ -60,23 +61,27 @@ print(f"Wait for filenames. queue len at start -{redis.llen(queue)}\n\n")
 while True:
     _, msg = redis.blpop(queue)
     filename = msg.decode()
-    if known_car_timeout > datetime.now():
-        print(f'skip {filename}')
-        continue
+
     license_no_text = try_OCR_file(filename).upper()
     if not license_no_text or len(license_no_text) < 3:
         continue
     for car_no, message_text in reactions.items():
-        timeout = reactions_timeouts.get(car_no)
+        timeout = reactions_timeouts.get(message_text)
         if car_no not in license_no_text:
             continue
         print(f'{car_no}\t{message_text}')
         if timeout and timeout > datetime.now():
             continue
         bot.message_to_subscribers('known_cars_subscribers', message_text)
-        os.system(ON_KNOWN_CAR_COMMAND.format(message_text=message_text, car_no=car_no))
-        known_car_timeout = datetime.now() + timedelta(minutes=1)
-        reactions_timeouts[car_no] = known_car_timeout + timedelta(minutes=1)
+        if not 18 > datetime.now().hour > 8:
+            os.system(ON_KNOWN_CAR_COMMAND.format(message_text=message_text, car_no=car_no))
+        known_car_timeout = datetime.now() + timedelta(minutes=10)
+        reactions_repeats[message_text] = reactions_repeats.get(message_text, 0) + 1
+        reactions_timeouts[message_text] = known_car_timeout + timedelta(
+            minutes=reactions_repeats[message_text]*reactions_repeats[message_text]*5
+        )
+        if timeout and datetime.now().date() != timeout.date():
+            reactions_repeats[message_text] = 1
 
     for subscribed_to_no in redis.keys(f'car_license_no_*_subscribers'):
         license_part = subscribed_to_no.decode()[29:]

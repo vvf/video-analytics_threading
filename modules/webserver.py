@@ -13,7 +13,7 @@ WIDTH = 640
 HEIGHT = 480
 
 WATCHDOG_TIMEOUT = 25
-FRAMES_TO_CLOSE = 900  # if 15 frames per second - so it will be
+FRAMES_TO_CLOSE = 500  # if 15 frames per second - so it will be
 
 
 def watch_dog_loop(video_feeds):
@@ -44,13 +44,19 @@ class VideoFeed:
         self.frames_sent = 0
         self.height = None
         self.start_time = datetime.datetime.now()
+        self.sending_frame = False
 
     def write_frame(self, jpg, frame_no=None):
+        # skip frames if not ready yet to send another frame
+        if self.sending_frame:
+            return True
+        self.sending_frame = True
         try:
             self.response.wfile.write(b"--jpgboundary")
             self.response.send_header('Content-type', 'image/jpeg')
             self.response.send_header('Content-length', str(jpg.size))
             self.response.send_header('X-Timestamp', datetime.datetime.now().timestamp())
+            self.response.send_header('X-Frame-No', frame_no or '0')
             self.response.end_headers()
             self.response.wfile.write(jpg)
             self.frames_sent += 1
@@ -62,6 +68,7 @@ class VideoFeed:
             # logger.exception(err)
             logger.error("Ignore error, just stop translation")
             self.stop_translation()
+        self.sending_frame = False
         # if frame_no:
         #     logger.debug(f'sent frame: {frame_no} to {self.response.client_address}')
         return True
@@ -76,7 +83,7 @@ class VideoFeed:
         return cv2.resize(img, (WIDTH, height))
 
     @classmethod
-    def start_translation(cls, web_response, cam_no):
+    def start_translation(cls, web_response, cam_no, only_last=True):
         if cam_no not in cls.video_feeds:
             cls.video_feeds[cam_no] = []
         new_feed = VideoFeed(web_response, cam_no)
@@ -85,6 +92,10 @@ class VideoFeed:
             cls.video_feeds[cam_no].append(new_feed)
             return
         new_feed.write_frame(last_jpg)
+        if only_last:
+            new_feed.stop_translation()
+            web_response.close_connection = True
+            return
         cls.video_feeds[cam_no].append(new_feed)
 
     @classmethod
@@ -190,10 +201,10 @@ class MyResponder(server.SimpleHTTPRequestHandler):
         self.send_header('Pragma', 'no-cache')
         self.send_header('Connection', 'Keep-Alive')
         self.end_headers()
-        VideoFeed.start_translation(self, cam_no)
+        self.close_connection = False
+        VideoFeed.start_translation(self, cam_no, '?stream' not in self.path)
         logger.info(f"start serve video of camera #{cam_no} for {self.client_address}")
         # print(f"start serve video of camera #{cam_no} for {self.client_address}")
-        self.close_connection = False
         return
 
     def do_HEAD(self):

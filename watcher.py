@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 import json
-import time
-from functools import partial
 
 import cv2
 import logging
@@ -14,7 +12,7 @@ from redis import Redis
 
 import modules.main
 from modules.alarm_zone import AlarmZone
-from modules.main import read_frame, get_date_dirname, open_video, look_image_queue
+from modules.main import read_frame, get_date_dirname, look_image_queue
 from modules.motion_detector import MotionDetector
 from modules import tgbot
 from modules.rtsp_reader import RTSPReaderThread
@@ -87,13 +85,14 @@ def image_parser_worker():
     is_odd = True
     while look_image_queue:
         queue_len = len(look_image_queue)
-        if queue_len > 700:
-            logger.warning("Image queue to long, don't look to image")
+        if queue_len > 300:
+            logger.warning(f"Image queue to long ({queue_len}), don't look to image")
             end_motion_frames.append(look_image_queue.pop(0))
         else:
-            if is_odd or queue_len <= 400:
+            if is_odd or queue_len <= 50:
                 look_at_image(look_image_queue.pop(0))
             else:
+                logger.warning(f"Image queue to long ({queue_len}), skip every second image")
                 end_motion_frames.append(look_image_queue.pop(0))
             is_odd = not is_odd
     logger.debug("finished image parser worker")
@@ -109,7 +108,8 @@ def look_at_image(image):
     date_dirname = get_date_dirname()
     now_ts = datetime.now()
     (h, w) = image.shape[:2]
-    blob = cv2.dnn.blobFromImage(cv2.resize(image, (300, 300)), 0.007843, (300, 300), 127.5)
+    margins = (w - h) // 2
+    blob = cv2.dnn.blobFromImage(cv2.resize(image[:, margins: -margins], (300, 300)), 0.007843, (300, 300), 127.5)
 
     net.setInput(blob)
     # logger.info('start detecting')
@@ -136,7 +136,8 @@ def look_at_image(image):
             detected_classes.add(CLASSES[idx])
             box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
             (startX, startY, endX, endY) = box.astype("int")
-
+            startX += margins
+            endX += margins
             if idx in NOT_DRAW_CLASSES:
                 continue
             dirname = CLASSES[idx]
@@ -164,7 +165,7 @@ def look_at_image(image):
                 startX = 0
 
             if confidence > 0.7 and idx in CAR_IDXES and (endY - startY) * (
-                        endX - startX) > CAR_MIN_SQUARE:  # square at least 300x300
+                    endX - startX) > CAR_MIN_SQUARE:  # square at least 300x300
                 Thread(target=get_details_objects_plate,
                        args=('license', image[startY:endY, startX:endX], date_dirname, i)).start()
                 check_alarm_zone.append(('car', len(draw_boxes) - 1))
@@ -233,7 +234,7 @@ def get_details_objects_plate(obj_type, img, dirname, npp=0, now_ts=None):
                 rimg = img
             cv2.imwrite(os.path.join(dirname, fname), rimg[y:y + h, x:x + w])
             if obj_type == 'license':
-                logger.info("queue OCR license no")
+                logger.info(f"queue OCR license number {fname}")
                 redis.lpush('licenses', os.path.join(dirname, fname))
         return True
 
@@ -246,7 +247,7 @@ def init_logging():
 
     err_lh = logging.StreamHandler()
     err_lh.setLevel(logging.WARNING)
-    formatter = logging.Formatter('%(asctime)s - %(threadName)s - %(levelname)s - %(message)s')
+    formatter = logging.Formatter('%(asctime)s - %(process)6d - %(threadName)s - %(levelname)s - %(message)s')
     err_lh.setFormatter(formatter)
     logger.addHandler(err_lh)
     fh = TimedRotatingFileHandler('watcher.log', 'D', 1, 7)
@@ -260,11 +261,24 @@ def init_logging():
 
 look_at_image_thread_counter = 0
 
+skip_next = False
+
 
 def add_image_to_look(image):
-    global look_at_image_thread, look_at_image_thread_counter
-    look_image_queue.append(image.copy())
-    check_and_restart_image_parser_thread()
+    global look_at_image_thread, look_at_image_thread_counter, skip_next
+    look_image_queue_len = len(look_image_queue)
+    if look_image_queue_len > 200:
+        print(f"Image queue to long ({look_image_queue_len}), skip every second image (when enq)")
+        check_and_restart_image_parser_thread()
+        return
+    if look_image_queue_len > 50:
+        skip_next = not skip_next
+    else:
+        skip_next = False
+    if skip_next:
+        print(f"Image queue to long ({look_image_queue_len}), skip every second image (when enq)")
+    else:
+        look_image_queue.append(image.copy())
 
 
 def check_and_restart_image_parser_thread(is_checker=False):
@@ -274,36 +288,6 @@ def check_and_restart_image_parser_thread(is_checker=False):
         look_at_image_thread_counter += 1
         look_at_image_thread = Thread(target=image_parser_worker, name=f'image_parser-{look_at_image_thread_counter}')
         look_at_image_thread.start()
-
-
-def cam1_loop():
-    import settings
-    logger.info("Start CAM1 motion detector")
-    rtsp_reader = RTSPReaderThread(rtsp_url=settings.rtsp_url1)
-    rtsp_reader.start()
-    motion_detector = MotionDetector(rtsp_reader, print_stat=False, cam_no=1, another_observers=another_observers)
-    motion_detector.motion_threshold_continue = 200
-    motion_detector.motion_threshold_start = 800
-    motion_id = 0
-    motion_stopped = None
-    while True:
-        image, motion_type = motion_detector.wait_motion()
-        if motion_type == MotionDetector.MOTION_ENDING:
-            if motion_stopped != motion_id:
-                notify_web_pages(action='motionStop', camera=1, motionId=motion_id)
-                motion_stopped = motion_id
-                logger.info(f"CAM1: motion #{motion_id} end")
-                print('\nCAM1: motion end\n')
-        elif motion_type == MotionDetector.MOTION_START:
-            motion_id += 1
-            logger.info(f"CAM1: motion #{motion_id} start ")
-            notify_web_pages(action='motionStart', camera=1, motionId=motion_id)
-            print('\nCAM1: motion start\n')
-        elif motion_type == MotionDetector.MOTION_CONTINUE and motion_stopped == motion_id:
-            logger.info(f"CAM1: motion #{motion_id} re-start ")
-            notify_web_pages(action='motionStart', camera=1, motionId=motion_id)
-            print('\nCAM1: motion ReStart\n')
-            motion_stopped = None
 
 
 def main():
@@ -316,9 +300,20 @@ def main():
     read_first_image(rtsp_reader, cam_no=0)
     alarmer = AlarmZone(*first_image.shape[:2])
     modules.main.writer = ViewSaver(first_image.shape[:2])
-    motion_detector = MotionDetector(rtsp_reader, another_observers=another_observers)
-    webserver.start_webserver(in_thread=True, daemon=True)
-    Thread(target=cam1_loop, daemon=True, name="Cam1_Main").start()
+    motion_detector = MotionDetector(rtsp_reader, another_observers=another_observers,
+                                     motion_filters={'image': lambda image: image[120:, :]})
+    try:
+        webserver.start_webserver(in_thread=True, daemon=True)
+    except:
+        exit(2)
+
+    # https://stackoverflow.com/questions/22125256/python-multiprocessing-watch-a-process-and-restart-it-when-fails
+
+    # from modules.cam1 import cam1_loop
+    # Thread(target=cam1_loop, daemon=True, name="Cam1_Main").start()
+    # from modules.cam2 import cam2_loop
+    # Thread(target=cam2_loop, daemon=True, name="Cam2_Main").start()
+
     last_motion = None
     motion_stopped = None
     try:
@@ -336,6 +331,7 @@ def main():
             elif motion_type == MotionDetector.MOTION_START:
                 # write all what was before motion (without looking)
                 modules.main.writer.fill_queue(motion_detector.pre_motion_buffer)
+                motion_detector.pre_motion_buffer.clear()
                 motion_id += 1
                 notify_web_pages(action='motionStart', camera=0, motionId=motion_id)
             elif motion_type == MotionDetector.MOTION_CONTINUE:

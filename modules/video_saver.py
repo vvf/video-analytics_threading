@@ -10,19 +10,20 @@ logger = logging.getLogger(__name__)
 
 
 class ViewSaver:
-    def __init__(self, dims):
+    def __init__(self, dims, cam_no=0, fps=12):
         self.video_saver = None
         self.file_name = None
         if isinstance(dims, list):
             dims = tuple(dims)
         self.dims = dims
+        self.cam_no = cam_no
         self.queue = []
-        self.worker_thread = None
+        self.worker_thread: Thread = None
 
-        self.temp_filename = 'current_{:%Y%m%d_%H%M%S}.mp4'.format(datetime.now())
+        self.temp_filename = 'current{}_{:%Y%m%d_%H%M%S}.mp4'.format(cam_no, datetime.now())
         self.video_saver = cv2.VideoWriter(self.temp_filename,
                                            cv2.VideoWriter_fourcc(*'MP4V'),
-                                           15, tuple(reversed(self.dims)), 1)
+                                           fps, tuple(reversed(self.dims)), 1)
         self.allow_add = True
         self.objects_types = set()
 
@@ -42,9 +43,12 @@ class ViewSaver:
         self.queue.append(image)
 
         if not self.worker_thread:
+            if self.dims is None:
+                self.dims = tuple(image.shape[:2])
             video_file_name = 'motion_{:%Y%m%d_%H%M%S}.mp4'.format(datetime.now())
-            self.file_name = os.path.join(get_date_dirname(), video_file_name)
-            self.worker_thread = Thread(target=self.write_worker, name="View_file_writer", daemon=True)
+            root = self.cam_no and f'cam{self.cam_no}' or None
+            self.file_name = os.path.join(get_date_dirname(root=root), video_file_name)
+            self.worker_thread = Thread(target=self.write_worker, name=f"View_file_writer_{self.cam_no}", daemon=True)
             self.worker_thread.start()
 
     def write_worker(self):
@@ -58,15 +62,18 @@ class ViewSaver:
             image = self.queue.pop(0)
             self.video_saver.write(image)
 
-        logger.info("Closing video file, move to {}".format(self.file_name))
+        logger.info("Closing video file {}".format(self.temp_filename))
         self.video_saver.release()
         self.video_saver = None
         # TODO: check length of file and
         if self.objects_types:
+            logger.info("Move video to {}".format(self.file_name))
             os.rename(self.temp_filename, self.file_name)
+            self.after_file_save()
         else:
             os.unlink(self.temp_filename)
         self.file_name = None
+
 
     def close_video(self):
         if self.video_saver:
@@ -77,8 +84,10 @@ class ViewSaver:
                 os.unlink(self.temp_filename)
 
     def fill_queue(self, queue):
-        # write all wat was before motion (without looking)
+        # write all what was before motion (without looking)
         pre_image = queue.pop()
         self.queue += queue
         self.write_frame(pre_image)
-        queue.clear()
+
+    def after_file_save(self):
+        pass

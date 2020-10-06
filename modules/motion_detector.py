@@ -16,8 +16,11 @@ class MotionDetector:
     MOTION_START = 1
     MOTION_CONTINUE = 2
     MOTION_ENDING = 3
+    motion_filters = None
 
-    def __init__(self, rtsp_reader: RTSPReaderThread, print_stat=True, cam_no=0, another_observers=None):
+    def __init__(self, rtsp_reader: RTSPReaderThread, print_stat=True, cam_no=0,
+                 another_observers=None, motion_filters=None):
+        self.AVG_ALPHA = 0.2
         self.no_motion_count = 0
         self.was_motion = False
         self.motion_frame_count = 0
@@ -30,6 +33,7 @@ class MotionDetector:
         self.motion_threshold_continue = 50
         self.motion_threshold_start = 200
         self.another_observers = another_observers or []
+        self.motion_filters = motion_filters
         self.last_image = None
         self.has_image_to_show_lock = None
         if another_observers:
@@ -86,27 +90,48 @@ class MotionDetector:
                 break
         return image, has_motion
 
-    def is_motion_in_frame(self, image):
-        image_small = cv2.resize(image, SMALL_IMG_DIM)[120:, :]
+    def make_small_image(self, image):
+        image_small = cv2.resize(image, SMALL_IMG_DIM)
         image_small = cv2.cvtColor(image_small, cv2.COLOR_BGR2GRAY)
-        image_small = cv2.GaussianBlur(image_small, BLUR_PARAM, 0)
+        if self.motion_filters and self.motion_filters.get('image'):
+            image_small = self.motion_filters['image'](image_small)
+        return image_small
+
+    def blur(self, image_small):
+        if self.motion_filters and self.motion_filters.get('image_blur'):
+            return self.motion_filters['image_blur'](image_small)
+        else:
+            return cv2.GaussianBlur(image_small, BLUR_PARAM, 0)
+
+    def get_diff(self, image_small):
+        delta = cv2.absdiff(self.first_image_small, image_small)
+        if self.motion_filters and self.motion_filters.get('delta'):
+            delta = self.motion_filters['threshold'](delta)
+        return delta
+
+    def threshold(self, delta):
+        thresh = cv2.threshold(delta, 35, 255, cv2.THRESH_BINARY)[1]
+        if self.motion_filters and self.motion_filters.get('threshold'):
+            thresh = self.motion_filters['threshold'](thresh)
+        return thresh
+
+    def is_motion_in_frame(self, image):
+        image_small = self.make_small_image(image)
+        image_small = self.blur(image_small)
+
         if self.first_image_small is None:
             self.first_image_small = image_small
             return MotionDetector.NO_MOTION
-        delta = cv2.absdiff(self.first_image_small, image_small)
-        thresh = cv2.threshold(delta, 35, 255, cv2.THRESH_BINARY)[1]
 
-        self.count_nonzero_thresh = \
-            max([
-                np.count_nonzero(thresh_slice)
-                for thresh_slice_x in np.split(thresh, 4, 1)
-                for thresh_slice in np.split(thresh_slice_x, 3, 0)
-            ])
+        delta = self.get_diff(image_small)
+        thresh = self.threshold(delta)
 
-        self.first_image_small = (self.first_image_small * 0.75).astype('uint8') + (image_small * 0.25).astype('uint8')
+        self.calc_number_of_nonzero(thresh)
+
+        self.make_average_image(image_small)
 
         motion_threshold = (self.was_motion or self.motion_frame_count > 0) and self.motion_threshold_continue or self.motion_threshold_start
-        if self.count_nonzero_thresh > motion_threshold:  # more than square , all image 300x300 = 90000, so more than 1%
+        if self.count_nonzero_thresh > motion_threshold:  # more than square .., all image 300x300 = 90000, so more than 1%
             # frame has motion
             self.motion_frame_count += 1
             self.no_motion_count = 0
@@ -127,7 +152,7 @@ class MotionDetector:
             self.motion_frame_count = 0
             self.no_motion_count += 1
             if self.no_motion_count > POST_MOTION_FRAMES and self.was_motion:
-                logger.debug(f"No motion for 15 frames {self.cam_no}")
+                logger.debug(f"No motion for {POST_MOTION_FRAMES} frames {self.cam_no}")
                 self.was_motion = False
             if self.was_motion:
                 if self.print_stat:
@@ -139,3 +164,18 @@ class MotionDetector:
         while len(self.pre_motion_buffer) > PRE_MOTION_FRAMES:
             self.pre_motion_buffer.pop(0)
         return MotionDetector.NO_MOTION
+
+    def make_average_image(self, image_small):
+        self.first_image_small = (self.first_image_small * (1-self.AVG_ALPHA)).astype('uint8') + (image_small * self.AVG_ALPHA).astype('uint8')
+
+    def calc_number_of_nonzero(self, thresh):
+        if self.motion_filters and self.motion_filters.get('count_nonzero_thresh'):
+            self.count_nonzero_thresh = self.motion_filters['count_nonzero_thresh'](thresh)
+        else:
+            self.count_nonzero_thresh = \
+                max([
+                    np.count_nonzero(thresh_slice)
+                    for thresh_slice_x in np.split(thresh, 4, 1)
+                    for thresh_slice in np.split(thresh_slice_x, 3, 0)
+                ])
+

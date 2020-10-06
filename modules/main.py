@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 writer = None
 tg_notified_time = None
 
+
 class LongReadFrameError(Exception):
     pass
 
@@ -33,16 +34,17 @@ def read_frame(rtsp_reader, long_wait_behaviour=0, wait_timeout=900, sleep_time=
     if not tg_notified_time or (datetime.now() - tg_notified_time).total_seconds() > 1200:
         tg_notified_time = datetime.now()
         bot.message_to_admin(f"Camera {cam_no is None and '' or cam_no} looks like not worked. "
-                             f"wait frame time was {timedelta(seconds=i*0.05)}")
+                             f"wait frame time was {timedelta(seconds=i * 0.05)}")
     if long_wait_behaviour == 0:
         import sys
         sys.exit(10)
     elif long_wait_behaviour == 1:
-        raise LongReadFrameError(f"Can't read frame long time! {timedelta(seconds=i*0.05)}")
+        raise LongReadFrameError(f"Can't read frame long time! {timedelta(seconds=i * 0.05)}")
     else:
-        logger.error(f"Can't read frame long time {timedelta(seconds=i*0.05)}!")
+        logger.error(f"Can't read frame long time {timedelta(seconds=i * 0.05)}!")
 
-def get_date_dirname(now_ts=None):
+
+def get_date_dirname(now_ts=None, root=''):
     if not now_ts:
         now_ts = datetime.now()
     images_paths = (
@@ -51,6 +53,8 @@ def get_date_dirname(now_ts=None):
         now_ts.strftime('%d'),
         now_ts.strftime('h%H'),
     )
+    if root:
+        images_paths = tuple(root.split('/')) + images_paths
     try:
         for i in range(len(images_paths)):
             p = os.path.join(*images_paths[:i + 1])

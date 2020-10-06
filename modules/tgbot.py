@@ -18,6 +18,27 @@ from threading import Thread
 logger = logging.getLogger(__name__)
 redis = StrictRedis()
 
+WAIT_IMAGE_MSG_DIVIDER = '***'
+
+
+def add_wait_image_chat(cam_no, chat_id, message_id):
+    logger.info(f'add_wait_image_chat: wait image from camera {cam_no} to {chat_id} replace message {message_id}')
+    redis.sadd(f'wait_image_{cam_no}', f'{chat_id}{WAIT_IMAGE_MSG_DIVIDER}{message_id}')
+
+
+def get_wait_image_chats(cam_no):
+    while True:
+        item = redis.spop(f'wait_image_{cam_no}')
+        if not item:
+            break
+        result = tuple((item.decode().split(WAIT_IMAGE_MSG_DIVIDER) + [None])[:2])
+        logger.info(f'get_wait_image_chats: Extracted image waiters: {result}')
+        yield result
+
+
+def has_wait_image_chats(cam_no):
+    return redis.scard(f'wait_image_{cam_no}') > 0
+
 
 def call_api(method, **data):
     bot_url = 'https://api.telegram.org/bot' + settings.TG_BOT_TOKEN
@@ -97,7 +118,8 @@ class BotApi:
 bot = BotApi()
 
 bot_handlers = []
-bot_wait_image_chats = []
+cam_noms = list(range(3))
+
 _bot_running = True
 bot_thread = None
 # WAIT_MOTION_CHATS_KEY = "bot_wait_motion_chats"
@@ -110,7 +132,9 @@ AVAILABLE_SUBSCRIBES = {
     'monitor_person': "человек в зоне мониторигна",
     'monitor_car': "машина в зоне мониторигна",
     'monitor_any': "человек или машина в зоне мониторигна",
-    'car_license_no': "появление машины с похожим номером (нужно указать номер, не менее 3х символов)"
+    'car_license_no': "появление машины с похожим номером (нужно указать номер, не менее 3х символов)",
+    'cam1': "Движение перед камерой над входом",
+    'cam2': "Движение перед камерой cam2"
 }
 
 
@@ -183,10 +207,14 @@ def bot_check_commands(update):
     else:
         command = ''
     if command == '/get_image':
-        if chat_id in bot_wait_image_chats:
-            return True
+        if not command_args or command_args[0] == 'all':
+            cam_no = cam_noms[:]
+        else:
+            cam_no = [int(c) for c in command_args if c.isdigit() and int(c) in cam_noms]
         msg = bot.answer(update, "Вам сейчас будет прислана фото с камеры")
-        bot_wait_image_chats.append((chat_id, msg['message_id']))
+        # msg = bot.answer(update, f"Вам сейчас будет прислана фото с камеры {cam_no}")
+        for c in cam_no:
+            add_wait_image_chat(c, chat_id, msg['message_id'])
         bot.sendChatAction(chat_id=chat_id, action='upload_photo')
         return True
 
@@ -327,14 +355,15 @@ def bot_get_callbacks(update):
 
 
 def send_video_and_del_message(**kwargs):
-    message_id = kwargs.pop('message_id')
+    message_id = kwargs.pop('message_id', None)
     logger.info(f"Send file {kwargs['video']} to user {kwargs['chat_id']}")
     bot.sendVideo(**kwargs)
     logger.info(f"Done send file {kwargs['video']} to user {kwargs['chat_id']}")
-    bot.deleteMessage(
-        chat_id=kwargs['chat_id'],
-        message_id=message_id
-    )
+    if message_id:
+        bot.deleteMessage(
+            chat_id=kwargs['chat_id'],
+            message_id=message_id
+        )
 
 
 def get_hours_keyboard_of_day(day):
@@ -384,20 +413,22 @@ def inline_button(text, callback_data, url=None):
 
 
 def send_photo_if_need(cam_no, image, frame_no=None):
-    if not bot_wait_image_chats:
+    if not has_wait_image_chats(cam_no):
         return
-    send_to = [bot_wait_image_chats.pop() for i in range(len(bot_wait_image_chats))]
     rv, jpg = cv2.imencode('.jpeg', image)
     caption = f"Photo from camera #{cam_no}"
     if frame_no:
         caption += f" (frame {frame_no})"
     if rv:
-        for u, message_id in send_to:
+        sended_count = 0
+        for u, message_id in get_wait_image_chats(cam_no):
             bot.sendPhoto(chat_id=u, photo=jpg, caption=caption)
-            bot.deleteMessage(chat_id=u, message_id=message_id)
+            if message_id:
+                bot.deleteMessage(chat_id=u, message_id=message_id)
+            sended_count += 1
+        bot.message_to_admin(f"sended_count  of {cam_no} = {sended_count}")
     else:
-        bot.message_to_admin("Error converting image")
-    bot.message_to_admin(f"len(bot_wait_image_chats)={len(bot_wait_image_chats)}")
+        bot.message_to_admin("Error converting image from {cam_no}")
 
 
 next_sent_motion_time = None
@@ -414,7 +445,7 @@ def send_motion_start(image, motion_id):
             bot.sendPhoto(chat_id=u.decode(), photo=jpg, title=f"Motion id:{motion_id}")
     else:
         bot.message_to_admin("Error converting image")
-    bot.message_to_admin(f"len(bot_wait_image_chats)={len(bot_wait_image_chats)}")
+    # bot.message_to_admin(f"len(bot_wait_image_chats)={len(bot_wait_image_chats)}")
 
 
 def send_photo_to_admins(image, **kwargs):
@@ -446,3 +477,35 @@ def send_monitoring_photo(image, is_person_or_car: bool, **kwargs):
         logger.debug(f"Send {redis_key} to {u.decode()}")
         bot.sendPhoto(chat_id=u.decode(), photo=jpg, **kwargs)
 
+
+def has_subscribers(event_name: str):
+    redis_key = f'{event_name}_subscribers'
+    return redis.scard(redis_key) > 0
+
+
+def send_event_photo(image, event_name: str, **kwargs):
+    redis_key = f'{event_name}_subscribers'
+    # bot.send_image_to_amdin(jpg, **kwargs)
+    jpg = None
+    for u in redis.sscan_iter(redis_key):
+        logger.debug(f"Send {redis_key} to {u.decode()}")
+        if jpg is None:
+            rv, jpg = cv2.imencode('.jpeg', image)
+            if not rv:
+                return bot.message_to_admin("Error converting image")
+
+        bot.sendPhoto(chat_id=u.decode(), photo=jpg, **kwargs)
+
+
+def send_event_video(event_name: str, video_file_path, **kwargs):
+    redis_key = f'{event_name}_subscribers'
+    for chat_id_bytes in redis.sscan_iter(redis_key):
+        logger.debug(f"Send video to {redis_key} to {chat_id_bytes.decode()}")
+        Thread(target=send_video_and_del_message,
+               daemon=True,
+               kwargs=dict(
+                   chat_id=chat_id_bytes.decode(),
+                   video=video_file_path,
+                   width=1920,
+                   height=1080
+               )).start()
