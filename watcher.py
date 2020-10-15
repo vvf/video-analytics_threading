@@ -75,27 +75,97 @@ def init_dnn():
 
     net = cv2.dnn.readNetFromCaffe("MobileNetSSD_deploy.prototxt.txt", "MobileNetSSD_deploy.caffemodel")
     logger.info('readed model')
+    # try:
+    #     if cv2.cuda.getCudaEnabledDeviceCount() > 0:
+    #         net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
+    #         net.setPreferableTarget(cv2.dnn.DNN_TARGET_OPENCL_FP16)
+    #         logger.info('tried to use cv2.dnn.DNN_TARGET_OPENCL_FP16')
+    #     elif 'openvino' in cv2.__version__:
+    #         net.setPreferableBackend(cv2.dnn.DNN_BACKEND_INFERENCE_ENGINE)
+    #         net.setPreferableTarget(cv2.dnn.DNN_TARGET_MYRIAD)
+    #         logger.info('tried to use MYRIAD coprocessor')
+    # except Exception as error:
+    #     logger.exception(error)
+    #     pass
 
 
-def imgwriter(filename, data):
+def imgwriter(filename, data, obj_name=None):
     cv2.imwrite(filename, data)
+    if obj_name in {'person', 'motorbike'}:
+        logger.info(f"Send image file with person")
+        redis.rpush('persons', os.path.abspath(filename))
 
 
 def image_parser_worker():
-    is_odd = True
+    try:
+        image_parser_worker_unsafe()
+    except Exception as error:
+        logger.exception(error)
+
+
+def image_parser_worker_unsafe():
+    from time import sleep
+    start_time = datetime.now()
+    frame = 0
+    frames_total = 0
+    skipped = 0
+    last_look_time = 0
+    WAIT_SECONDS = 5
+    logger.info(f"Start parse images. queue len= {len(look_image_queue)}")
     while look_image_queue:
         queue_len = len(look_image_queue)
-        if queue_len > 300:
+        frames_total += 1
+        if last_look_time > 2:
+            logger.warning(f"Image queue skip frame because prev look time was too long - {last_look_time}s.")
+            last_look_time /= 2
+            end_motion_frames.append(look_image_queue.pop(0))
+            skipped += 1
+            continue
+        elif queue_len > 190:
             logger.warning(f"Image queue to long ({queue_len}), don't look to image")
             end_motion_frames.append(look_image_queue.pop(0))
-        else:
-            if is_odd or queue_len <= 50:
-                look_at_image(look_image_queue.pop(0))
-            else:
-                logger.warning(f"Image queue to long ({queue_len}), skip every second image")
+            skipped += 1
+            continue
+        elif queue_len > 90:
+            if frames_total % 4 != 0:
+                logger.warning(f"Image queue to long ({queue_len}), skip every 4-th ")
                 end_motion_frames.append(look_image_queue.pop(0))
-            is_odd = not is_odd
-    logger.debug("finished image parser worker")
+                skipped += 1
+                continue
+        elif queue_len > 50:
+            if frames_total % 3 != 0:
+                logger.warning(f"Image queue to long ({queue_len}), skip every 3-th ")
+                end_motion_frames.append(look_image_queue.pop(0))
+                skipped += 1
+                continue
+        elif queue_len > 20:
+            if frames_total % 2 != 0:
+                logger.warning(f"Image queue to long ({queue_len}), skip every 2-th ")
+                end_motion_frames.append(look_image_queue.pop(0))
+                skipped += 1
+                continue
+        start_looking_time = datetime.now()
+        look_at_image(look_image_queue.pop(0))
+        stop_looking_time = datetime.now()
+        looking_time = (stop_looking_time - start_looking_time)
+        last_look_time = looking_time.total_seconds()
+        frame += 1
+        if not look_image_queue:
+            # wait for new images to look at in 3 seconds before finish
+            logger.info(f"Look image queue empty - wait for {WAIT_SECONDS} sec for refilling it")
+            logger.info(f"looking_at_image last:{1 / looking_time.total_seconds():7.3}fps "
+                        f" | avg:{frame / (stop_looking_time - start_time).total_seconds():6.3}"
+                        f" dt={looking_time}   {'-' * 20}")
+            for _ in range(WAIT_SECONDS * 4):
+                if look_image_queue:
+                    logger.info(f"Look image queue refilled! seen/skipped/total - {frame}/{skipped}/{frames_total}")
+                    start_time = datetime.now()
+                    frame = 0
+                    frames_total = 0
+                    skipped = 0
+                    break
+                sleep(.25)
+    logger.info(f"Finished image parser worker. seen/skipped/total - {frame}/{skipped}/{frames_total}")
     if end_motion_frames:
         modules.main.writer.fill_queue(end_motion_frames)
         end_motion_frames.clear()
@@ -110,6 +180,7 @@ def look_at_image(image):
     (h, w) = image.shape[:2]
     margins = (w - h) // 2
     blob = cv2.dnn.blobFromImage(cv2.resize(image[:, margins: -margins], (300, 300)), 0.007843, (300, 300), 127.5)
+    w = h  # source blob is square from the middle of image
 
     net.setInput(blob)
     # logger.info('start detecting')
@@ -133,32 +204,45 @@ def look_at_image(image):
             # then compute the (x, y)-coordinates of the bounding box for
             # the object
             idx = int(detections[0, 0, i, 1])
-            detected_classes.add(CLASSES[idx])
+            object_name = CLASSES[idx]
+            detected_classes.add(object_name)
             box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
             (startX, startY, endX, endY) = box.astype("int")
+
+            #  part where was looking at is square inside image, coordinates need to be shifted too
             startX += margins
             endX += margins
             if idx in NOT_DRAW_CLASSES:
                 continue
-            dirname = CLASSES[idx]
 
             # display the prediction
             label = "{}: {:.2f}%".format(CLASSES[idx], confidence * 100)
-            logger.info('{} ({},{})-({},{}) {:%H%M%S}'.format(label, startX, startY, endX, endY, now_ts))
+
+            logger.info(f'{label} ({startX},{startY})-({endX},{endY}) {now_ts:%H:%M:%S} {datetime.now() - now_ts}')
+
             draw_boxes.append((idx, startX, startY, endX, endY, label))
             if startY < 0:
                 startY = 0
             if startX < 0:
                 startX = 0
 
-            fname = 'cut-{:%m%d_%H%M%S}-{}_{}.png'.format(now_ts, dirname, i)
+            fname = 'cut-{:%m%d_%H%M%S}-{}_{}.png'.format(now_ts, object_name, i)
             if not os.path.exists(os.path.join(date_dirname, fname)):
-                Thread(target=imgwriter,
-                       name='writer-' + fname,
-                       args=(os.path.join(date_dirname, fname), image_for_cut[startY:endY, startX:endX])).start()
+                Thread(
+                    target=imgwriter,
+                    name='writer-' + fname,
+                    args=(
+                        os.path.join(date_dirname, fname),
+                        image_for_cut[startY:endY, startX:endX],
+                        object_name
+                    )
+                ).start()
 
             startY -= 5
             startX -= 5
+            endX += 5
+            endY += 5
+
             if startY < 0:
                 startY = 0
             if startX < 0:
@@ -167,12 +251,18 @@ def look_at_image(image):
             if confidence > 0.7 and idx in CAR_IDXES and (endY - startY) * (
                     endX - startX) > CAR_MIN_SQUARE:  # square at least 300x300
                 Thread(target=get_details_objects_plate,
+                       name='license_searcher',
+                       daemon=True,
                        args=('license', image[startY:endY, startX:endX], date_dirname, i)).start()
                 check_alarm_zone.append(('car', len(draw_boxes) - 1))
             elif confidence > 0.7 and idx in PERSON_IDXES and (endY - startY) >= PERSON_MIN_HEIGHT:
                 Thread(target=get_details_objects_plate,
+                       name='face_searcher',
+                       daemon=True,
                        args=('face', image[startY:endY, startX:endX], date_dirname, i, now_ts)).start()
                 Thread(target=get_details_objects_plate,
+                       name='face2_searcher',
+                       daemon=True,
                        args=('face2', image[startY:endY, startX:endX], date_dirname, i, now_ts)).start()
                 if idx == EXACTLY_PERSON_INDEX:
                     check_alarm_zone.append(('person', len(draw_boxes) - 1))
@@ -246,7 +336,8 @@ def init_logging():
     import sys
 
     err_lh = logging.StreamHandler()
-    err_lh.setLevel(logging.WARNING)
+    err_lh.terminator = '     \n'
+    err_lh.setLevel(logging.INFO)
     formatter = logging.Formatter('%(asctime)s - %(process)6d - %(threadName)s - %(levelname)s - %(message)s')
     err_lh.setFormatter(formatter)
     logger.addHandler(err_lh)
@@ -254,7 +345,9 @@ def init_logging():
     fh.setFormatter(formatter)
     fh.setLevel(logging.DEBUG)
     logger.addHandler(fh)
-    logger.addHandler(logging.StreamHandler(sys.stdout))
+    stdout_h = logging.StreamHandler(sys.stdout)
+    stdout_h.terminator = '    \n'
+    logger.addHandler(stdout_h)
     logger.setLevel(logging.DEBUG)
     logging.getLogger('modules').addHandler(fh)
 
@@ -268,26 +361,24 @@ def add_image_to_look(image):
     global look_at_image_thread, look_at_image_thread_counter, skip_next
     look_image_queue_len = len(look_image_queue)
     if look_image_queue_len > 200:
-        print(f"Image queue to long ({look_image_queue_len}), skip every second image (when enq)")
+        logger.info(f"Image queue to long ({look_image_queue_len}), skip frame")
         check_and_restart_image_parser_thread()
         return
-    if look_image_queue_len > 50:
-        skip_next = not skip_next
-    else:
-        skip_next = False
-    if skip_next:
-        print(f"Image queue to long ({look_image_queue_len}), skip every second image (when enq)")
-    else:
-        look_image_queue.append(image.copy())
+    look_image_queue.append(image.copy())
+    check_and_restart_image_parser_thread()
 
 
 def check_and_restart_image_parser_thread(is_checker=False):
     global look_at_image_thread, look_at_image_thread_counter
-    if look_image_queue and (not look_at_image_thread or not look_at_image_thread.is_alive()):
-        logger.info("starting image parser worker " + (look_at_image_thread and 'was thread' or ''))
-        look_at_image_thread_counter += 1
-        look_at_image_thread = Thread(target=image_parser_worker, name=f'image_parser-{look_at_image_thread_counter}')
-        look_at_image_thread.start()
+    if not look_image_queue:
+        return
+    if look_at_image_thread and look_at_image_thread.is_alive():
+        return
+    look_at_image_thread_counter += 1
+    logger.info(f"start worker thread image parser {look_at_image_thread_counter} "
+                f"prev thread alive - {look_at_image_thread and look_at_image_thread.is_alive()}")
+    look_at_image_thread = Thread(target=image_parser_worker, name=f'image_parser-{look_at_image_thread_counter}')
+    look_at_image_thread.start()
 
 
 def main():
@@ -313,7 +404,7 @@ def main():
     # Thread(target=cam1_loop, daemon=True, name="Cam1_Main").start()
     # from modules.cam2 import cam2_loop
     # Thread(target=cam2_loop, daemon=True, name="Cam2_Main").start()
-
+    logger.info(f'OpenCV version - {cv2.__version__}')
     last_motion = None
     motion_stopped = None
     try:
@@ -344,8 +435,9 @@ def main():
                 # detect objects and save image with detected objects
                 add_image_to_look(image)
             check_and_restart_image_parser_thread(True)
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as err:
         webserver.close_translations()
+        raise err
 
 
 # def test_videowriter():
@@ -362,24 +454,40 @@ def main():
 #         print("Write next file")
 #         time.sleep(1)
 
+def sig_usr_handler(sign, frame):
+    from threading import enumerate
+    logger.error('Running threads:')
+    for th in enumerate():
+        logger.error(f'... {th.name}')
+
 
 if __name__ == '__main__':
+    import signal
+
+    signal.signal(signal.SIGUSR1, sig_usr_handler)
     try:
         # test_videowriter()
         main()
     except Exception as err:
         logger.exception(err)
     except KeyboardInterrupt:
+        logger.info("\n\nGraceful shutdown...")
+        logger.info("Tg-bot stopping")
         tgbot.stop_bot()
+        logger.info("Tg-bot stopped")
         if rtsp_reader:
+            logger.info("rtsp_reader stopping...")
             rtsp_reader.stop()
             if rtsp_reader.is_alive():
                 rtsp_reader.join(1000)
+            logger.info("rtsp_reader stopped")
         import sys
+
+        logger.info("exiting")
 
         sys.exit(0)
     finally:
         if modules.main.writer:
             modules.main.writer.close_video()
 
-    input("Press enter to continue")
+    # input("Press enter to continue")
